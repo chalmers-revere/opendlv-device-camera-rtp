@@ -15,33 +15,79 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "cluon-complete.hpp"
-#include "opendlv-standard-message-set.hpp"
-
-#include <curl/curl.h>
-
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
 
+#include <curl/curl.h>
+
+#include "cluon-complete.hpp"
+#include "opendlv-standard-message-set.hpp"
+#include "sps-decoder.hpp"
+
+struct SdpData {
+  std::string streamUri;
+  std::string sps;
+  std::string pps;
+  double framerate;
+};
+
 size_t parseSdpData(void *ptr, size_t size, size_t nmemb, void *userptr)
 {
   size_t nbytes = size * nmemb;
-  std::string *s = static_cast<std::string *>(userptr);
+  SdpData *sdpData = static_cast<SdpData *>(userptr);
 
   std::istringstream f(static_cast<char *>(ptr));
   std::string line;
   while (std::getline(f, line)) {
-    std::cout << line << std::endl;
-    // Find the latest occurance.
-    if (!line.rfind("a=control:")) {
-      s->assign(line.substr(10));
+    {
+      std::string n("a=control:");
+      if (line.find(n) != -1) {
+        sdpData->streamUri = line.substr(n.length());
+      }
+    }
+    {
+      std::string n("sprop-parameter-sets=");
+      int32_t j = line.find(n);
+      if (j != -1) {
+        cluon::FromJSONVisitor base64Decoder;
+        std::string spsAndPps = line.substr(j + n.length());
+        int32_t i = spsAndPps.find(",");
+        sdpData->sps = base64Decoder.decodeBase64(spsAndPps.substr(0, i));
+        sdpData->pps = base64Decoder.decodeBase64(spsAndPps.substr(i + 1));
+      }
+    }
+    {
+      std::string n("a=framerate:");
+      if (line.find(n) != -1) {
+        sdpData->framerate = stod(line.substr(n.length()));
+      }
     }
   }
 
   return nbytes;
+}
+
+std::string getHostname(std::string uri) {
+  std::string tmp;
+  size_t m = uri.find_first_of("@");
+  if (m == -1) {
+    size_t k = uri.find_first_of(":");
+    std::string protocol = uri.substr(0, k); 
+    tmp = uri.substr(k + 3);
+  } else {
+    tmp = uri.substr(m + 1);
+  }
+  size_t l = tmp.find_first_of(":");
+  if (l == -1) {
+    l = tmp.find_first_of("/");
+    if (l == -1) {
+      l = tmp.length();
+    }
+  }
+  return tmp.substr(0, l);
 }
 
 void sendMagicNumber(uint32_t srcPort, std::string addr, uint32_t dstPort)
@@ -76,46 +122,34 @@ int32_t main(int32_t argc, char **argv)
   int32_t retCode{1};
   auto commandlineArguments = cluon::getCommandlineArguments(argc, argv);
   if ( (0 == commandlineArguments.count("url")) ||
-      (0 == commandlineArguments.count("width")) ||
-      (0 == commandlineArguments.count("height")) ||
       (0 == commandlineArguments.count("cid")) ) {
     std::cerr << argv[0] << " interfaces with the given RTSP/RTP-based camera "
       << "and sends the compressed frames as OpenDLV messages." << std::endl
-      << "Usage:   " << argv[0] << " --url=<URL> --width=<width> "
-      << "--height=<height> --cid=<CID> [--id<ID>] [--verbose]" 
-      << std::endl
+      << "Usage:   " << argv[0] << " --url=<URL> --cid=<CID> [--id<ID>] "
+      << "[--verbose]" << std::endl
       << "         --cid:       CID of the OD4Session to receive Envelopes for "
       << "recording" << std::endl
       << "         --id:        ID to use in case of multiple instances of" 
       << argv[0] << std::endl
-      << "         --rec:       name of the recording file; default: "
-      << "YYYY-MM-DD_HHMMSS.rec" << std::endl
-      << "         --recsuffix: additional suffix to add to the .rec file" 
-      << std::endl
-      << "         --remote:    listen for cluon.data.RecorderCommand to "
-      << "start/stop recording" << std::endl
       << "         --url:       URL providing an MJPEG stream over http" 
       << std::endl
-      << "         --name.i420: name of the shared memory for the I420 "
-      << "formatted image; when omitted, video0.i420 is chosen" << std::endl
-      << "         --name.argb: name of the shared memory for the I420 "
-      << "formatted image; when omitted, video0.argb is chosen" << std::endl
-      << "         --width:     desired width of a frame" << std::endl
-      << "         --height:    desired height of a frame" << std::endl
-      << "         --freq:      desired frame rate" << std::endl
       << "         --verbose:   display captured image" << std::endl
       << "Example: " << argv[0] << " --url=http://192.168.0.11?mjpeg "
-      << "--width=640 --height=480 --verbose --rec=myFile.rec --cid=111 "
-      << "--remote" << std::endl;
+      << "--verbose --cid=111" << std::endl;
   } else {
     std::string const URL{commandlineArguments["url"]};
     uint32_t ID{(commandlineArguments.count("id") != 0) ?
         static_cast<uint32_t>(std::stoi(commandlineArguments["id"])) : 0};
-    uint32_t WIDTH{
-      static_cast<uint32_t>(std::stoi(commandlineArguments["width"]))};
-    uint32_t HEIGHT{
-      static_cast<uint32_t>(std::stoi(commandlineArguments["height"]))};
     bool VERBOSE{commandlineArguments.count("verbose") != 0};
+
+    std::string hostname = getHostname(URL);
+    std::string localHostname;
+
+    // TODO: Find automatically.
+    uint32_t const clientPortA = 33056;
+    uint32_t const clientPortB = 33057;
+    uint32_t const serverPortA = 50000;
+    uint32_t const serverPortB = 50001;
 
     cluon::OD4Session od4{
       static_cast<uint16_t>(std::stoi(commandlineArguments["cid"]))};
@@ -128,7 +162,8 @@ int32_t main(int32_t argc, char **argv)
     curl_easy_setopt(curl, CURLOPT_URL, URL.c_str());
    // curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);
 
-    std::string const transport("RTP/AVP;unicast;client_port=33056-33057");
+    std::string const transport("RTP/AVP;unicast;client_port=" 
+        + std::to_string(clientPortA) + "-" + std::to_string(clientPortB));
     std::string const range("npt=0.000-");
 
     // RTSP options
@@ -136,9 +171,15 @@ int32_t main(int32_t argc, char **argv)
     curl_easy_setopt(curl, CURLOPT_RTSP_REQUEST, CURL_RTSPREQ_OPTIONS);
     curl_easy_perform(curl);
 
+    {
+      char *ip;
+      curl_easy_getinfo(curl, CURLINFO_LOCAL_IP, &ip);
+      localHostname = std::string(ip);
+    }
+
     // RTSP describe
-    std::string streamUri;
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &streamUri);
+    SdpData sdpData;
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sdpData);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, parseSdpData);
     curl_easy_setopt(curl, CURLOPT_RTSP_REQUEST, CURL_RTSPREQ_DESCRIBE);
     curl_easy_perform(curl);
@@ -146,14 +187,14 @@ int32_t main(int32_t argc, char **argv)
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, nullptr);
 
     // RTSP setup
-    curl_easy_setopt(curl, CURLOPT_RTSP_STREAM_URI, streamUri.c_str());
+    curl_easy_setopt(curl, CURLOPT_RTSP_STREAM_URI, sdpData.streamUri.c_str());
     curl_easy_setopt(curl, CURLOPT_RTSP_TRANSPORT, transport.c_str());
     curl_easy_setopt(curl, CURLOPT_RTSP_REQUEST, CURL_RTSPREQ_SETUP);
     curl_easy_perform(curl);
 
     // Send magic number
-    sendMagicNumber(33056, "84.217.42.199", 50000);
-    sendMagicNumber(33057, "84.217.42.199", 50001);
+    sendMagicNumber(clientPortA, hostname, serverPortA);
+    sendMagicNumber(clientPortB, hostname, serverPortB);
 
     // RTSP play
     curl_easy_setopt(curl, CURLOPT_RTSP_STREAM_URI, URL.c_str());
@@ -162,106 +203,110 @@ int32_t main(int32_t argc, char **argv)
     curl_easy_perform(curl);
     curl_easy_setopt(curl, CURLOPT_RANGE, nullptr);
 
-    uint32_t h264NalBufPos = 0;
-    char h264NalBuf[65000];
-    bool hasNalStart = false;
+
+    SpsInfo spsInfo = decodeSps(
+        reinterpret_cast<uint8_t const *>(sdpData.sps.data()),
+        sdpData.sps.length());
+    uint32_t width = spsInfo.width;
+    uint32_t height = spsInfo.height;
+
+    std::cout << "Connection to RTP camera established. Resolution " 
+      << width << "x" << height << ", framerate " << sdpData.framerate 
+      << std::endl;
+
+    std::string outData;
 
     auto onStreamData =
-      [&od4, &h264NalBuf, &h264NalBufPos, &hasNalStart, &WIDTH, &HEIGHT, &ID,
-        &VERBOSE](
+      [&od4, &outData, &width, &height, &sdpData, &ID, &VERBOSE](
         std::string &&data, std::string &&,
         std::chrono::system_clock::time_point &&) noexcept {
       char const *buf_start = static_cast<char const *>(data.c_str());
 
-      uint8_t b0 = *buf_start;
-      uint8_t version = (b0 >> 6);
-      bool hasPadding = (b0 & 0x20) >> 5;
-      bool hasExtension = (b0 & 0x10) >> 4;
-      uint8_t csrcCount = (b0 & 0xf);
+      static uint8_t const nalPrefix[] = {0x00, 0x00, 0x01};
+
+      uint8_t const b0 = *buf_start;
+      uint8_t const version = (b0 >> 6);
+      bool const hasPadding = (b0 & 0x20) >> 5;
+      bool const hasExtension = (b0 & 0x10) >> 4;
+      uint8_t const csrcCount = (b0 & 0xf);
       
-      uint8_t b1 = *(buf_start + 1);
-      bool profileMarker = (b1 >> 7);
-      uint8_t profileType = (b1 & 0x7f);
+      uint8_t const b1 = *(buf_start + 1);
+      bool const profileMarker = (b1 >> 7);
+      uint8_t const profileType = (b1 & 0x7f);
 
       uint32_t b2b3;
       memcpy(&b2b3, buf_start + 2, 2);
-      uint32_t sequenceNumber = ntohs(b2b3);
+      uint32_t const sequenceNumber = ntohs(b2b3);
       
       uint32_t b4b5b6b7;
       memcpy(&b4b5b6b7, buf_start + 4, 4);
-      uint32_t timestamp = ntohl(b4b5b6b7);
+      uint32_t const timestamp = ntohl(b4b5b6b7);
       
       uint32_t b8b9b10b11;
       memcpy(&b8b9b10b11, buf_start + 8, 4);
-      uint32_t ssrcId = ntohl(b8b9b10b11);
+      uint32_t const ssrcId = ntohl(b8b9b10b11);
 
       uint32_t paddingLen = 0;
       if (hasPadding) {
         paddingLen = *(buf_start + data.length() - 1);
       }
 
-      uint8_t b12 = *(buf_start + 12);
-      uint8_t h264RtpF = b12 >> 7;
+      uint8_t const b12 = *(buf_start + 12);
+      uint8_t const h264RtpF = b12 >> 7;
       if (h264RtpF) {
         std::cerr << "Unexpected H264 RTP header, F=1." << std::endl;
         return;
       }
-      uint8_t h264RtpNri = (b12 & 0x60f) >> 5;
-      uint8_t h264RtpType = (b12 & 0x1f);
-      bool isFragmented = false;
+      uint8_t const h264RtpNri = (b12 & 0x60) >> 5;
+      uint8_t const h264RtpType = (b12 & 0x1f);
+      uint8_t nalType;
 
-   //   if (h264RtpType == 1) {
-        uint32_t nalLen = data.length() - 13 - paddingLen;
+      if (h264RtpType >= 1 && h264RtpType <= 23) {
+        std::cout << "hej" << std::endl;
+        nalType = h264RtpType;
+        uint32_t nalLen = data.length() - 12 - paddingLen;
+        outData = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+            + std::string(buf_start + 12, nalLen);
+
+
         opendlv::proxy::ImageReading ir;
-          ir.fourcc("h264").width(WIDTH).height(HEIGHT).data(
-              std::string(buf_start + 13, nalLen));
-          od4.send(ir, cluon::time::now(), ID);
-    /*  } else if (h264RtpType == 28) {
-        isFragmented = true;
+        ir.fourcc("h264").width(width).height(height).data(outData);
+        od4.send(ir, cluon::time::now(), ID);
 
+        outData = "";
+
+      } else if (h264RtpType == 28) {
         uint8_t b13 = *(buf_start + 13);
         bool isStartFragment = b13 >> 7;
         bool isEndFragment = (b13 & 0x40) >> 6;
-        h264RtpType = (b13 & 0x1f);
+        nalType = (b13 & 0x1f);
 
+        std::string extra;
         if (isStartFragment) {
-          h264NalBufPos = 0;
-          hasNalStart = true;
+          uint8_t nalHeader = (h264RtpNri << 5) | nalType;
+          extra = std::string(&nalPrefix[0], &nalPrefix[0] + 3) + sdpData.sps 
+            + std::string(&nalPrefix[0], &nalPrefix[0] + 3) + sdpData.pps  
+            + std::string(&nalPrefix[0], &nalPrefix[0] + 3)
+            + static_cast<char>(nalHeader);
         }
-        
+
         uint32_t nalLen = data.length() - 14 - paddingLen;
-        memcpy(h264NalBuf + h264NalBufPos, buf_start + 14, nalLen);
-        h264NalBufPos += nalLen;
+        outData += extra + std::string(buf_start + 14, nalLen);
 
-        std::cout << h264NalBufPos << std::endl;
-
-        if (isEndFragment && hasNalStart) {
+        if (isEndFragment) {
           opendlv::proxy::ImageReading ir;
-          ir.fourcc("h264").width(WIDTH).height(HEIGHT).data(
-              std::string(h264NalBuf, h264NalBufPos));
+          ir.fourcc("h264").width(width).height(height).data(outData);
           od4.send(ir, cluon::time::now(), ID);
-          hasNalStart = false;
+
+          outData = "";
         }
+      } else {
+        std::cout << "WARNING: unknown RTP H264 payload type: " << h264RtpType
+          << std::endl;
       }
-      */
 
       if (VERBOSE) {
-        std::cout << "Got data" << std::endl;
-        std::cout << "Version: " << +version << std::endl;
-        std::cout << "Has padding: " << hasPadding << std::endl;
-        std::cout << "Has extension: " << hasExtension << std::endl;
-        std::cout << "CSRC count: " << +csrcCount << std::endl;
-        std::cout << "Profile marker: " << profileMarker << std::endl;
-        std::cout << "Profile type: " << +profileType << std::endl;
-        std::cout << "Sequence number: " << +sequenceNumber << std::endl;
         std::cout << "Timestamp: " << +timestamp << std::endl;
-        std::cout << "SSRC id: " << +ssrcId << std::endl;
-
-      //  std::cout << "Payload len: " << payloadLen << std::endl;
-
-        std::cout << "H264 RTP header NRI: " << +h264RtpNri << std::endl;
-        std::cout << "H264 RTP header type: " << +h264RtpType << std::endl;
-        std::cout << "H264 RTP is fragmented: " << isFragmented << std::endl;
       }
     };
     
@@ -273,11 +318,11 @@ int32_t main(int32_t argc, char **argv)
     };
 
     {
-      cluon::UDPReceiver streamUdpReceiver{"10.42.170.243", 33056, onStreamData,
-        50000};
+      cluon::UDPReceiver streamUdpReceiver{localHostname, clientPortA, 
+        onStreamData, serverPortA};
     
-      cluon::UDPReceiver controlUdpReceiver{"10.42.170.243", 33057,
-        onControlData, 50001};
+      cluon::UDPReceiver controlUdpReceiver{localHostname, clientPortB,
+        onControlData, serverPortB};
 
       while (od4.isRunning()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
