@@ -26,8 +26,7 @@ RUN echo http://dl-4.alpinelinux.org/alpine/v3.8/main > /etc/apk/repositories &&
         g++ \
         git \
         nasm \
-        make \
-        upx
+        make
 RUN cd /tmp && \
     git clone --depth 1 https://github.com/curl/curl.git && \
     cd curl && ./buildconf && \
@@ -38,7 +37,7 @@ WORKDIR /opt/sources
 RUN mkdir build && \
     cd build && \
     cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_INSTALL_PREFIX=/tmp .. && \
-    make && make install && upx -9 /tmp/bin/opendlv-device-camera-rtp
+    make && make install
 
 
 # Part to deploy opendlv-device-camera-mjpegoverhttp.
