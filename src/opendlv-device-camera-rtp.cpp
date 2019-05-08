@@ -175,8 +175,19 @@ int32_t main(int32_t argc, char **argv)
         static_cast<uint32_t>(
             std::stoi(commandlineArguments["server-port-udp-a"])) : 50000};
     uint32_t const serverPortB = serverPortA + 1;
+    
+    uint32_t const clientPortA = {
+      (commandlineArguments.count("client-port-udp-a") != 0) ?
+        static_cast<uint32_t>(
+            std::stoi(commandlineArguments["client-port-udp-a"])) : 33000};
+    uint32_t const clientPortB = clientPortA + 1;
 
-    uint32_t clientPortA = 33000;
+    if (verbose) {
+      std::cout << "Using client ports " << clientPortA << "-" << clientPortB 
+        << std::endl;
+    }
+
+  /*  uint32_t clientPortA = 33000;
     uint32_t clientPortB = 33001;
     for (uint32_t port = 33000; port < 34000; port += 2) {
       int32_t clientSocketA = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -213,7 +224,7 @@ int32_t main(int32_t argc, char **argv)
       clientPortA = port;
       clientPortB = port + 1;
       break;
-    }
+    }*/
 
     std::random_device rd;
     std::mt19937_64 gen(rd());
