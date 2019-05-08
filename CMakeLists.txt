@@ -42,12 +42,11 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
     -fomit-frame-pointer \
     -pipe \
     -Weffc++ \
-    -Wall -Wextra -Wshadow -Wdeprecated \
+    -Wall -Wshadow -Wdeprecated \
     -Wdiv-by-zero -Wfloat-equal -Wfloat-conversion -Wsign-compare -Wpointer-arith \
     -Wuninitialized -Wunreachable-code \
-    -Wunused -Wunused-function -Wunused-label -Wunused-parameter -Wunused-but-set-parameter -Wunused-but-set-variable \
-    -Wunused-value -Wunused-variable -Wunused-result \
     -Wmissing-field-initializers -Wmissing-format-attribute -Wmissing-include-dirs -Wmissing-noreturn")
+    # -Wextra -Wunused -Wunused-variable -Wunused-function -Wunused-label -Wunused-parameter -Wunused-but-set-parameter -Wunused-but-set-variable \
 
 ################################################################################
 # Extract cluon-msc from cluon-complete.hpp.

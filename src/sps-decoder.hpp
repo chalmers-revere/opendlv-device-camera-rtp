@@ -55,7 +55,7 @@ inline int32_t extractSignedExpGolomb(uint8_t const *buf,
     uint32_t const wordLen, uint32_t &bitOffset)
 {
   int32_t v = extractUnsignedExpGolomb(buf, wordLen, bitOffset);
-  int32_t ret = ceil(static_cast<double>(v) / 2.0);
+  int32_t ret = static_cast<int32_t>(ceil(static_cast<double>(v) / 2.0));
   if (v % 2 == 0) {
     ret = -ret;
   }
