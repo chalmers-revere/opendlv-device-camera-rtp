@@ -314,15 +314,16 @@ int32_t main(int32_t argc, char **argv)
     double jitter = 700.0; // TODO: Calculate jitter (easy)
     uint32_t highestSeq = 0;
 
+    std::fstream f("test.rec", std::ios::out|std::ios::binary|std::ios::trunc);
 
     auto onStreamData =
-      [&od4, &outData, &width, &height, &sdpData, &rtcpMutex,
+      [&od4, &f, &outData, &width, &height, &sdpData, &rtcpMutex,
       &latestNtpTime, &latestRtpTime, &highestSeq, &senderStamp, &verbose](
         std::string &&data, std::string &&,
         std::chrono::system_clock::time_point &&) noexcept {
       char const *buf_start = static_cast<char const *>(data.c_str());
 
-      static uint8_t const nalPrefix[] = {0x00, 0x00, 0x01};
+      static uint8_t const nalPrefix[] = {0x00, 0x00, 0x00, 0x01};
 
       uint8_t const b0 = *buf_start;
      // uint8_t const version = (b0 >> 6);
@@ -339,9 +340,9 @@ int32_t main(int32_t argc, char **argv)
         return;
       }
 
-      uint32_t b2b3;
+      uint16_t b2b3;
       memcpy(&b2b3, buf_start + 2, 2);
-      uint32_t const sequenceNumber = ntohs(b2b3);
+      uint16_t const sequenceNumber = ntohs(b2b3);
       
       uint32_t b4b5b6b7;
       memcpy(&b4b5b6b7, buf_start + 4, 4);
@@ -380,12 +381,35 @@ int32_t main(int32_t argc, char **argv)
       if (h264RtpType >= 1 && h264RtpType <= 23) {
         nalType = h264RtpType;
         uint32_t nalLen = data.length() - 12 - paddingLen;
-        outData = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+        outData = std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4) 
             + std::string(buf_start + 12, nalLen);
+
+        std::cout << "Received " << outData.size() << " bytes." << std::endl;
 
         opendlv::proxy::ImageReading ir;
         ir.fourcc("h264").width(width).height(height).data(outData);
-        od4.send(ir, ts, senderStamp);
+
+        if (f.good()) {
+          cluon::data::Envelope envelope;
+          {
+            cluon::ToProtoVisitor protoEncoder;
+            {
+              envelope.dataType(ir.ID());
+              ir.accept(protoEncoder);
+              envelope.serializedData(protoEncoder.encodedData());
+              envelope.sent(cluon::time::now());
+              envelope.sampleTimeStamp(ts);
+              envelope.senderStamp(senderStamp);
+            }
+          }
+
+          std::string serializedData{cluon::serializeEnvelope(std::move(envelope))};
+          f.write(serializedData.data(), serializedData.size());
+          f.flush();
+        }
+        else {
+          od4.send(ir, ts, senderStamp);
+        }
 
         outData = "";
 
@@ -398,11 +422,11 @@ int32_t main(int32_t argc, char **argv)
         std::string extra;
         if (isStartFragment) {
           uint8_t nalHeader = (h264RtpNri << 5) | nalType;
-          extra = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+          extra = std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4) 
             + sdpData.sps[payloadType] 
-            + std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+            + std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4) 
             + sdpData.pps[payloadType]
-            + std::string(&nalPrefix[0], &nalPrefix[0] + 3)
+            + std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4)
             + static_cast<char>(nalHeader);
         }
 
@@ -410,9 +434,30 @@ int32_t main(int32_t argc, char **argv)
         outData += extra + std::string(buf_start + 14, nalLen);
 
         if (isEndFragment) {
+          std::cout << "Received " << outData.size() << " bytes (defragmented)." << std::endl;
           opendlv::proxy::ImageReading ir;
           ir.fourcc("h264").width(width).height(height).data(outData);
-          od4.send(ir, ts, senderStamp);
+          if (f.good()) {
+            cluon::data::Envelope envelope;
+            {
+              cluon::ToProtoVisitor protoEncoder;
+              {
+                envelope.dataType(ir.ID());
+                ir.accept(protoEncoder);
+                envelope.serializedData(protoEncoder.encodedData());
+                envelope.sent(cluon::time::now());
+                envelope.sampleTimeStamp(ts);
+                envelope.senderStamp(senderStamp);
+              }
+            }
+
+            std::string serializedData{cluon::serializeEnvelope(std::move(envelope))};
+            f.write(serializedData.data(), serializedData.size());
+            f.flush();
+          }
+          else {
+            od4.send(ir, ts, senderStamp);
+          }
 
           outData = "";
         }
