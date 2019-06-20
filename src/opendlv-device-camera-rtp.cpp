@@ -303,6 +303,14 @@ int32_t main(int32_t argc, char **argv)
             recFile = nullptr;
           }
         }
+        else {
+          std::lock_guard<std::mutex> lck(recFileMutex);
+          if (recFile && recFile->good()) {
+            std::string serializedData{cluon::serializeEnvelope(std::move(envelope))};
+            recFile->write(serializedData.data(), serializedData.size());
+            recFile->flush();
+          }
+        }
       }));
     }
 
