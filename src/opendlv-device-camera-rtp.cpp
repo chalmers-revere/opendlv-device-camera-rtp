@@ -475,7 +475,7 @@ int32_t main(int32_t argc, char **argv)
               ir.accept(protoEncoder);
               envelope.serializedData(protoEncoder.encodedData());
               envelope.sent(cluon::time::now());
-              envelope.sampleTimeStamp(ts);
+              envelope.sampleTimeStamp(cluon::time::now());
               envelope.senderStamp(senderStamp);
             }
           }
@@ -523,7 +523,7 @@ int32_t main(int32_t argc, char **argv)
                 ir.accept(protoEncoder);
                 envelope.serializedData(protoEncoder.encodedData());
                 envelope.sent(cluon::time::now());
-                envelope.sampleTimeStamp(ts);
+                envelope.sampleTimeStamp(cluon::time::now());
                 envelope.senderStamp(senderStamp);
               }
             }
