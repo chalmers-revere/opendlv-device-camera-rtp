@@ -93,6 +93,42 @@ size_t parseSdpData(void *ptr, size_t size, size_t nmemb, void *userptr)
   return nbytes;
 }
 
+void printHex(char const *data, uint32_t datalen)
+{
+  std::cout << std::hex;
+  for (uint32_t i = 0; i < datalen; ++i) {
+    uint32_t row = i / 16;
+    uint32_t elem = i % 16;
+    if (elem == 0) {
+      std::cout << std::setfill('0') << std::setw(8) 
+        << (row * 16) << ":  ";
+    }
+    std::cout << std::setfill('0') << std::setw(2) 
+      << +static_cast<uint8_t>(data[i]) << " ";
+    if ((i+1) % 8 == 0) {
+      std::cout << " ";
+    }
+    if (elem == 15 || i == datalen - 1) {
+      if (i == datalen - 1) {
+        uint32_t extra = 2 - (elem+1) / 8;
+        for (uint32_t k = 0; k < 3 * (15 - elem) + extra; ++k) {
+          std::cout << " ";
+        }
+      }
+      for (int32_t j = elem; j >= 0; --j) {
+        if (data[i-j] >= 32 && data[i-j] <= 126) {
+          std::cout << data[i-j];
+        } else {
+          std::cout << ".";
+        }
+      }
+      std::cout << std::endl;
+    }
+  }
+  std::cout << std::dec;
+}
+
+
 std::string getHostname(std::string uri) {
   std::string tmp;
   size_t m = uri.find_first_of("@");
@@ -314,7 +350,6 @@ int32_t main(int32_t argc, char **argv)
     double jitter = 700.0; // TODO: Calculate jitter (easy)
     uint32_t highestSeq = 0;
 
-
     auto onStreamData =
       [&od4, &outData, &width, &height, &sdpData, &rtcpMutex,
       &latestNtpTime, &latestRtpTime, &highestSeq, &senderStamp, &verbose](
@@ -322,7 +357,12 @@ int32_t main(int32_t argc, char **argv)
         std::chrono::system_clock::time_point &&) noexcept {
       char const *buf_start = static_cast<char const *>(data.c_str());
 
-      static uint8_t const nalPrefix[] = {0x00, 0x00, 0x01};
+
+   //   std::cout << "Complete data: " << std::endl;
+   //   printHex(data.c_str(), data.length());
+
+
+      static uint8_t const annexbPrefix[] = {0x00, 0x00, 0x01};
 
       uint8_t const b0 = *buf_start;
      // uint8_t const version = (b0 >> 6);
@@ -377,15 +417,46 @@ int32_t main(int32_t argc, char **argv)
         highestSeq = sequenceNumber > highestSeq ? sequenceNumber : highestSeq;
       }
 
+      std::cout << "h264 rtp type: " << +h264RtpType << " (" << cluon::time::toMicroseconds(ts) << ")." << std::endl;
+
+      std::string spsAndPpsNals = std::string(&annexbPrefix[0], &annexbPrefix[0] + 3) 
+        + sdpData.sps[payloadType]
+        + std::string(&annexbPrefix[0], &annexbPrefix[0] + 3) 
+        + sdpData.pps[payloadType]
+        + std::string(&annexbPrefix[0], &annexbPrefix[0] + 3);
+
       if (h264RtpType >= 1 && h264RtpType <= 23) {
         nalType = h264RtpType;
-        uint32_t nalLen = data.length() - 12 - paddingLen;
-        outData = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
-            + std::string(buf_start + 12, nalLen);
+
+        {
+          std::string spsNal = std::string(
+              &annexbPrefix[0], &annexbPrefix[0] + 3) 
+            + sdpData.sps[payloadType];
+          opendlv::proxy::ImageReading ir;
+          ir.fourcc("h264").width(width).height(height).data(spsNal);
+          od4.send(ir, ts, senderStamp);
+        }
+        {
+          std::string ppsNal = std::string(
+              &annexbPrefix[0], &annexbPrefix[0] + 3) 
+            + sdpData.pps[payloadType];
+          opendlv::proxy::ImageReading ir;
+          ir.fourcc("h264").width(width).height(height).data(ppsNal);
+          od4.send(ir, ts, senderStamp);
+        }
+
+
+        uint32_t nalLen = data.length() - 13 - paddingLen;
+        outData = spsAndPpsNals
+          + std::string(&annexbPrefix[0], &annexbPrefix[0] + 3) 
+          + std::string(buf_start + 13, nalLen);
 
         opendlv::proxy::ImageReading ir;
         ir.fourcc("h264").width(width).height(height).data(outData);
         od4.send(ir, ts, senderStamp);
+          
+        std::cout << "Sent data (" << +h264RtpType << "): " << std::endl;
+        printHex(outData.c_str(), outData.length());
 
         outData = "";
 
@@ -395,24 +466,55 @@ int32_t main(int32_t argc, char **argv)
         bool isEndFragment = (b13 & 0x40) >> 6;
         nalType = (b13 & 0x1f);
 
-        std::string extra;
+        std::cout << " .. s=" << +isStartFragment << " e=" << +isEndFragment << " nri=" << +h264RtpNri << " nal-type=" << +nalType << std::endl;
+
         if (isStartFragment) {
+
+          {
+            std::string spsNal = std::string(
+                &annexbPrefix[0], &annexbPrefix[0] + 3) 
+              + sdpData.sps[payloadType];
+            opendlv::proxy::ImageReading ir;
+            ir.fourcc("h264").width(width).height(height).data(spsNal);
+            od4.send(ir, ts, senderStamp);
+          }
+          {
+            std::string ppsNal = std::string(
+                &annexbPrefix[0], &annexbPrefix[0] + 3) 
+              + sdpData.pps[payloadType];
+            opendlv::proxy::ImageReading ir;
+            ir.fourcc("h264").width(width).height(height).data(ppsNal);
+            od4.send(ir, ts, senderStamp);
+          }
+
           uint8_t nalHeader = (h264RtpNri << 5) | nalType;
-          extra = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
-            + sdpData.sps[payloadType] 
-            + std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
-            + sdpData.pps[payloadType]
-            + std::string(&nalPrefix[0], &nalPrefix[0] + 3)
+          outData = spsAndPpsNals 
+            + std::string(&annexbPrefix[0], &annexbPrefix[0] + 3)
             + static_cast<char>(nalHeader);
+        
+          std::cout << " .. nal-header=" << +nalHeader << std::endl;
+        
+       //   std::cout << "Out data start: " << std::endl;
+       //   printHex(outData.c_str(), outData.length());
         }
 
         uint32_t nalLen = data.length() - 14 - paddingLen;
-        outData += extra + std::string(buf_start + 14, nalLen);
+        std::string fragment(buf_start + 14, nalLen);
+        outData += fragment;
+          
+        std::cout << "Fragment: " << std::endl;
+        printHex(fragment.c_str(), fragment.length());
+
+      //  std::cout << "Out data added fragment: " << std::endl;
+      //  printHex(outData.c_str(), outData.length());
 
         if (isEndFragment) {
           opendlv::proxy::ImageReading ir;
           ir.fourcc("h264").width(width).height(height).data(outData);
           od4.send(ir, ts, senderStamp);
+        
+          std::cout << "Sent data (" << +h264RtpType << "): " << std::endl;
+          printHex(outData.c_str(), outData.length());
 
           outData = "";
         }
