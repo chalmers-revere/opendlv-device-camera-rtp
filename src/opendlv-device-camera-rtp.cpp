@@ -18,7 +18,10 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <fstream>
 #include <memory>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <random>
 
@@ -161,7 +164,10 @@ int32_t main(int32_t argc, char **argv)
       << std::endl
       << "         --url:       URL providing an MJPEG stream over http" 
       << std::endl
-      << "         --verbose:   display captured image" << std::endl
+      << "         --verbose:   show further information" << std::endl
+      << "         --remote:    enable remotely activated recording" << std::endl
+      << "         --rec:       name of the recording file; default: YYYY-MM-DD_HHMMSS.rec" << std::endl
+      << "         --recsuffix: additional suffix to add to the .rec file" << std::endl
       << "Example: " << argv[0] << " --url=http://192.168.0.11?mjpeg "
       << "--verbose --cid=111" << std::endl;
   } else {
@@ -181,6 +187,33 @@ int32_t main(int32_t argc, char **argv)
         static_cast<uint32_t>(
             std::stoi(commandlineArguments["client-port-udp-a"])) : 33000};
     uint32_t const clientPortB = clientPortA + 1;
+
+    auto getYYYYMMDD_HHMMSS = [](){
+      cluon::data::TimeStamp now = cluon::time::now();
+
+      const long int _seconds = now.seconds();
+      struct tm *tm = localtime(&_seconds);
+
+      uint32_t year = (1900 + tm->tm_year);
+      uint32_t month = (1 + tm->tm_mon);
+      uint32_t dayOfMonth = tm->tm_mday;
+      uint32_t hours = tm->tm_hour;
+      uint32_t minutes = tm->tm_min;
+      uint32_t seconds = tm->tm_sec;
+
+      std::stringstream sstr;
+      sstr << year << "-" << ( (month < 10) ? "0" : "" ) << month << "-" << ( (dayOfMonth < 10) ? "0" : "" ) << dayOfMonth
+                     << "_" << ( (hours < 10) ? "0" : "" ) << hours
+                     << ( (minutes < 10) ? "0" : "" ) << minutes
+                     << ( (seconds < 10) ? "0" : "" ) << seconds;
+
+      std::string retVal{sstr.str()};
+      return retVal;
+    };
+    const bool REMOTE{commandlineArguments.count("remote") != 0};
+    const std::string REC{(commandlineArguments["rec"].size() != 0) ? commandlineArguments["rec"] : ""};
+    const std::string RECSUFFIX{commandlineArguments["recsuffix"]};
+    const std::string NAME_RECFILE{(REC.size() != 0) ? REC + RECSUFFIX : (getYYYYMMDD_HHMMSS() + RECSUFFIX + ".rec")};
 
     if (verbose) {
       std::cout << "Using client ports " << clientPortA << "-" << clientPortB 
@@ -235,8 +268,51 @@ int32_t main(int32_t argc, char **argv)
 
     uint32_t const clientSsrc = dis(gen);
 
-    cluon::OD4Session od4{
-      static_cast<uint16_t>(std::stoi(commandlineArguments["cid"]))};
+    std::unique_ptr<cluon::OD4Session> od4{new cluon::OD4Session(static_cast<uint16_t>(std::stoi(commandlineArguments["cid"])))};
+
+    std::string nameOfRecFile;
+    std::mutex recFileMutex{};
+    std::unique_ptr<std::fstream> recFile{nullptr};
+    if (!REMOTE) {
+      recFile.reset(new std::fstream(NAME_RECFILE.c_str(), std::ios::out|std::ios::binary|std::ios::trunc));
+      std::cout << "[opendlv-video-camera-rtp]: Created " << NAME_RECFILE << "." << std::endl;
+    }
+    else {
+      od4.reset(new cluon::OD4Session(static_cast<uint16_t>(std::stoi(commandlineArguments["cid"])),
+          [REC, RECSUFFIX, getYYYYMMDD_HHMMSS, &recFileMutex, &recFile, &nameOfRecFile](cluon::data::Envelope &&envelope) noexcept {
+        if (cluon::data::RecorderCommand::ID() == envelope.dataType()) {
+          std::lock_guard<std::mutex> lck(recFileMutex);
+          cluon::data::RecorderCommand rc = cluon::extractMessage<cluon::data::RecorderCommand>(std::move(envelope));
+          if (1 == rc.command()) {
+            if (recFile && recFile->good()) {
+              recFile->flush();
+              recFile->close();
+              recFile = nullptr;
+              std::cout << "[opendlv-video-camera-rtp]: Closed " << nameOfRecFile << "." << std::endl;
+            }
+            nameOfRecFile = (REC.size() != 0) ? REC + RECSUFFIX : (getYYYYMMDD_HHMMSS() + RECSUFFIX + ".rec");
+            recFile.reset(new std::fstream(nameOfRecFile.c_str(), std::ios::out|std::ios::binary|std::ios::trunc));
+            std::cout << "[opendlv-video-camera-rtp]: Created " << nameOfRecFile << "." << std::endl;
+          }
+          else if (2 == rc.command()) {
+            if (recFile && recFile->good()) {
+              recFile->flush();
+              recFile->close();
+              std::cout << "[opendlv-video-camera-rtp]: Closed " << nameOfRecFile << "." << std::endl;
+            }
+            recFile = nullptr;
+          }
+        }
+        else {
+          std::lock_guard<std::mutex> lck(recFileMutex);
+          if (recFile && recFile->good()) {
+            std::string serializedData{cluon::serializeEnvelope(std::move(envelope))};
+            recFile->write(serializedData.data(), serializedData.size());
+            recFile->flush();
+          }
+        }
+      }));
+    }
 
     CURL *curl = curl_easy_init();
 
@@ -314,15 +390,14 @@ int32_t main(int32_t argc, char **argv)
     double jitter = 700.0; // TODO: Calculate jitter (easy)
     uint32_t highestSeq = 0;
 
-
     auto onStreamData =
-      [&od4, &outData, &width, &height, &sdpData, &rtcpMutex,
+      [&od4, &recFileMutex, &recFile, &outData, &width, &height, &sdpData, &rtcpMutex,
       &latestNtpTime, &latestRtpTime, &highestSeq, &senderStamp, &verbose](
         std::string &&data, std::string &&,
         std::chrono::system_clock::time_point &&) noexcept {
       char const *buf_start = static_cast<char const *>(data.c_str());
 
-      static uint8_t const nalPrefix[] = {0x00, 0x00, 0x01};
+      static uint8_t const nalPrefix[] = {0x00, 0x00, 0x00, 0x01};
 
       uint8_t const b0 = *buf_start;
      // uint8_t const version = (b0 >> 6);
@@ -339,9 +414,9 @@ int32_t main(int32_t argc, char **argv)
         return;
       }
 
-      uint32_t b2b3;
+      uint16_t b2b3;
       memcpy(&b2b3, buf_start + 2, 2);
-      uint32_t const sequenceNumber = ntohs(b2b3);
+      uint16_t const sequenceNumber = ntohs(b2b3);
       
       uint32_t b4b5b6b7;
       memcpy(&b4b5b6b7, buf_start + 4, 4);
@@ -380,12 +455,35 @@ int32_t main(int32_t argc, char **argv)
       if (h264RtpType >= 1 && h264RtpType <= 23) {
         nalType = h264RtpType;
         uint32_t nalLen = data.length() - 12 - paddingLen;
-        outData = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+        outData = std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4) 
             + std::string(buf_start + 12, nalLen);
+
+        if (verbose) {
+          std::cout << "Received " << outData.size() << " bytes." << std::endl;
+        }
 
         opendlv::proxy::ImageReading ir;
         ir.fourcc("h264").width(width).height(height).data(outData);
-        od4.send(ir, ts, senderStamp);
+
+        std::lock_guard<std::mutex> lck(recFileMutex);
+        if (recFile && recFile->good()) {
+          cluon::data::Envelope envelope;
+          {
+            cluon::ToProtoVisitor protoEncoder;
+            {
+              envelope.dataType(ir.ID());
+              ir.accept(protoEncoder);
+              envelope.serializedData(protoEncoder.encodedData());
+              envelope.sent(cluon::time::now());
+              envelope.sampleTimeStamp(cluon::time::now());
+              envelope.senderStamp(senderStamp);
+            }
+          }
+
+          std::string serializedData{cluon::serializeEnvelope(std::move(envelope))};
+          recFile->write(serializedData.data(), serializedData.size());
+          recFile->flush();
+        }
 
         outData = "";
 
@@ -398,11 +496,11 @@ int32_t main(int32_t argc, char **argv)
         std::string extra;
         if (isStartFragment) {
           uint8_t nalHeader = (h264RtpNri << 5) | nalType;
-          extra = std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+          extra = std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4) 
             + sdpData.sps[payloadType] 
-            + std::string(&nalPrefix[0], &nalPrefix[0] + 3) 
+            + std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4) 
             + sdpData.pps[payloadType]
-            + std::string(&nalPrefix[0], &nalPrefix[0] + 3)
+            + std::string(reinterpret_cast<const char*>(&nalPrefix[0]), 4)
             + static_cast<char>(nalHeader);
         }
 
@@ -410,9 +508,30 @@ int32_t main(int32_t argc, char **argv)
         outData += extra + std::string(buf_start + 14, nalLen);
 
         if (isEndFragment) {
+          if (verbose) {
+            std::cout << "Received " << outData.size() << " bytes (defragmented)." << std::endl;
+          }
           opendlv::proxy::ImageReading ir;
           ir.fourcc("h264").width(width).height(height).data(outData);
-          od4.send(ir, ts, senderStamp);
+          std::lock_guard<std::mutex> lck(recFileMutex);
+          if (recFile && recFile->good()) {
+            cluon::data::Envelope envelope;
+            {
+              cluon::ToProtoVisitor protoEncoder;
+              {
+                envelope.dataType(ir.ID());
+                ir.accept(protoEncoder);
+                envelope.serializedData(protoEncoder.encodedData());
+                envelope.sent(cluon::time::now());
+                envelope.sampleTimeStamp(cluon::time::now());
+                envelope.senderStamp(senderStamp);
+              }
+            }
+
+            std::string serializedData{cluon::serializeEnvelope(std::move(envelope))};
+            recFile->write(serializedData.data(), serializedData.size());
+            recFile->flush();
+          }
 
           outData = "";
         }
@@ -573,7 +692,7 @@ int32_t main(int32_t argc, char **argv)
 
       uint32_t const heartbeatInterval = 50;
       uint32_t h = 0;
-      while (od4.isRunning()) {
+      while (od4->isRunning()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
         if (h > heartbeatInterval) {
