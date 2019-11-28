@@ -34,7 +34,7 @@ To run this microservice using our pre-built Docker multi-arch images, simply
 start it as follows:
 
 ```
-docker run --rm -ti --init --ipc=host --net=host chalmersrevere/opendlv-device-camera-rtp-multi:v0.0.3 --url=rtsp://192.168.0.123/myStream --cid=111 --remote --recsuffix=-rtp
+docker run --rm -ti --init --ipc=host --net=host chalmersrevere/opendlv-device-camera-rtp-multi:v0.0.4 --url=rtsp://10.42.42.128/axis-media/media.amp?camera=1 --cid=102 --id=0 --client-port-udp-a=35000 --name=abc --verbose --remote --recsuffic=-rtp
 ```
 
 
