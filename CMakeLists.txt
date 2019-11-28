@@ -84,6 +84,18 @@ find_package(Libcurl REQUIRED)
 include_directories(SYSTEM ${CURL_INCLUDE_DIRS})
 set(LIBRARIES ${LIBRARIES} ${CURL_LIBRARIES})
 
+find_package(X11 REQUIRED)
+include_directories(SYSTEM ${X11_INCLUDE_DIR})
+set(LIBRARIES ${LIBRARIES} ${X11_X11_LIB})
+
+find_package(Libopenh264 REQUIRED)
+include_directories(SYSTEM ${OPENH264_INCLUDE_DIRS})
+set(LIBRARIES ${LIBRARIES} ${OPENH264_LIBRARIES})
+
+find_package(Libyuv REQUIRED)
+include_directories(SYSTEM ${YUV_INCLUDE_DIRS})
+set(LIBRARIES ${LIBRARIES} ${YUV_LIBRARIES})
+
 ################################################################################
 # Create executable.
 add_executable(${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR}/src/${PROJECT_NAME}.cpp ${CMAKE_BINARY_DIR}/opendlv-standard-message-set.hpp)

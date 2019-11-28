@@ -27,6 +27,10 @@
 
 #include <curl/curl.h>
 
+#include <wels/codec_api.h>
+#include <libyuv.h>
+#include <X11/Xlib.h>
+
 #include "cluon-complete.hpp"
 #include "opendlv-standard-message-set.hpp"
 #include "sps-decoder.hpp"
@@ -151,8 +155,8 @@ int32_t main(int32_t argc, char **argv)
       (0 == commandlineArguments.count("cid")) ) {
     std::cerr << argv[0] << " interfaces with the given RTSP/RTP-based camera "
       << "and sends the compressed frames as OpenDLV messages." << std::endl
-      << "Usage:   " << argv[0] << " --url=<URL> --cid=<CID> "
-      << "[--server-port-udp-a=<Port>] [--id=<ID>] "
+      << "Usage:   " << argv[0] << " --url=<URL> --cid=<CID> --name.argb=<name.argb>"
+      << "--name.i420=<name.i420> [--server-port-udp-a=<Port>] [--id=<ID>] "
       << "[--verbose]" << std::endl
       << "         --cid:       CID of the OD4Session to receive Envelopes for "
       << "recording" << std::endl
@@ -162,19 +166,22 @@ int32_t main(int32_t argc, char **argv)
       << "         --id:        ID to use in case of multiple instances of "
          "running microservices." 
       << std::endl
+      << "         --name.argb: name of the shared memory segment for the decoded h264 frame in ARGB pixel layout" << std::endl
+      << "         --name.i420: name of the shared memory segment for the decoded h264 frame in I420 pixel layout" << std::endl
       << "         --url:       URL providing an MJPEG stream over http" 
       << std::endl
       << "         --verbose:   show further information" << std::endl
       << "         --remote:    enable remotely activated recording" << std::endl
       << "         --rec:       name of the recording file; default: YYYY-MM-DD_HHMMSS.rec" << std::endl
       << "         --recsuffix: additional suffix to add to the .rec file" << std::endl
-      << "Example: " << argv[0] << " --url=http://192.168.0.11?mjpeg "
-      << "--verbose --cid=111" << std::endl;
+      << "Example: " << argv[0] << " --url=rtsp://10.42.42.128/axis-media/media.amp?camera=1 --cid=102 --id=0 --client-port-udp-a=35000 --remote --recsuffix=-rtp" << std::endl;
   } else {
     std::string const url{commandlineArguments["url"]};
     uint32_t senderStamp{(commandlineArguments.count("id") != 0) ?
         static_cast<uint32_t>(std::stoi(commandlineArguments["id"])) : 0};
     bool verbose{commandlineArguments.count("verbose") != 0};
+    const std::string NAME_ARGB{commandlineArguments["name.argb"]};
+    const std::string NAME_I420{commandlineArguments["name.i420"]};
 
     uint32_t const serverPortA = {
       (commandlineArguments.count("server-port-udp-a") != 0) ?
@@ -219,45 +226,6 @@ int32_t main(int32_t argc, char **argv)
       std::cout << "Using client ports " << clientPortA << "-" << clientPortB 
         << std::endl;
     }
-
-  /*  uint32_t clientPortA = 33000;
-    uint32_t clientPortB = 33001;
-    for (uint32_t port = 33000; port < 34000; port += 2) {
-      int32_t clientSocketA = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
-      struct sockaddr_in src;
-      std::memset(&src, 0, sizeof(src));
-      src.sin_family = AF_INET;
-      src.sin_addr.s_addr = htonl(INADDR_ANY);
-      src.sin_port = htons(port); 
-
-      if (bind(clientSocketA, reinterpret_cast<struct sockaddr *>(&src), 
-            sizeof(src)) != 0) {
-        close(clientSocketA);
-        continue;
-      }
-      
-      int32_t clientSocketB = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-      
-      std::memset(&src, 0, sizeof(src));
-      src.sin_family = AF_INET;
-      src.sin_addr.s_addr = htonl(INADDR_ANY);
-      src.sin_port = htons(port + 1); 
-
-      if (bind(clientSocketB, reinterpret_cast<struct sockaddr *>(&src), 
-            sizeof(src)) != 0) {
-        close(clientSocketA);
-        close(clientSocketB);
-        continue;
-      }
-        
-      close(clientSocketA);
-      close(clientSocketB);
-
-      clientPortA = port;
-      clientPortB = port + 1;
-      break;
-    }*/
 
     std::random_device rd;
     std::mt19937_64 gen(rd());
@@ -382,6 +350,37 @@ int32_t main(int32_t argc, char **argv)
       << width << "x" << height << ", framerate " << sdpData.framerate 
       << std::endl;
 
+    // h264 decoder
+    ISVCDecoder *decoder{nullptr};
+    WelsCreateDecoder(&decoder);
+    if (0 != WelsCreateDecoder(&decoder) && (nullptr != decoder)) {
+      std::cerr << argv[0] << ": Failed to create openh264 decoder." << std::endl;
+      return retCode;
+    }
+    std::unique_ptr<cluon::SharedMemory> sharedMemoryARGB(nullptr);
+    std::unique_ptr<cluon::SharedMemory> sharedMemoryI420(nullptr);
+
+    int logLevel{verbose ? WELS_LOG_INFO : WELS_LOG_QUIET};
+    decoder->SetOption(DECODER_OPTION_TRACE_LEVEL, &logLevel);
+
+    SDecodingParam decodingParam;
+    {
+      memset(&decodingParam, 0, sizeof(SDecodingParam));
+      decodingParam.eEcActiveIdc = ERROR_CON_DISABLE;
+      decodingParam.bParseOnly = false;
+      decodingParam.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
+    }
+    if (cmResultSuccess != decoder->Initialize(&decodingParam)) {
+      std::cerr << argv[0] << ": Failed to initialize openh264 decoder." << std::endl;
+      return retCode;
+    }
+
+    Display *display{nullptr};
+    Visual *visual{nullptr};
+    Window window{0};
+    XImage *ximage{nullptr};
+
+
     std::string outData;
 
     std::mutex rtcpMutex;
@@ -392,7 +391,9 @@ int32_t main(int32_t argc, char **argv)
 
     auto onStreamData =
       [&od4, &recFileMutex, &recFile, &outData, &width, &height, &sdpData, &rtcpMutex,
-      &latestNtpTime, &latestRtpTime, &highestSeq, &senderStamp, &verbose](
+      &latestNtpTime, &latestRtpTime, &highestSeq, &senderStamp, &verbose, NAME_ARGB,
+      NAME_I420, &display, &visual, &window, &ximage, &sharedMemoryARGB,
+      &sharedMemoryI420, &decoder](
         std::string &&data, std::string &&,
         std::chrono::system_clock::time_point &&) noexcept {
       char const *buf_start = static_cast<char const *>(data.c_str());
@@ -462,6 +463,58 @@ int32_t main(int32_t argc, char **argv)
           std::cout << "Received " << outData.size() << " bytes." << std::endl;
         }
 
+	if (!sharedMemoryARGB) {
+          std::clog << "[opendlv-device-camera-rtp]: Created shared memory " << NAME_ARGB << " (" << (width * height * 4) << " bytes) for an ARGB image (width = " << width << ", height = " << height << ")." << std::endl;
+          sharedMemoryARGB.reset(new cluon::SharedMemory{NAME_ARGB, width * height * 4});
+          if (verbose) {
+            display = XOpenDisplay(NULL);
+            visual = DefaultVisual(display, 0);
+            window = XCreateSimpleWindow(display, RootWindow(display, 0), 0, 0, width, height, 1, 0, 0);
+            ximage = XCreateImage(display, visual, 24, ZPixmap, 0, reinterpret_cast<char*>(sharedMemoryARGB->data()), width, height, 32, 0);
+            XMapWindow(display, window);
+          }
+        }
+	if (!sharedMemoryI420) {
+          std::clog << "[opendlv-device-camera-rtp]: Created shared memory " << NAME_I420 << " (" << (width * height * 3/2) << " bytes) for an I420 image (width = " << width << ", height = " << height << ")." << std::endl;
+          sharedMemoryI420.reset(new cluon::SharedMemory{NAME_I420, width * height * 3/2});
+	}
+	if (sharedMemoryARGB && sharedMemoryI420) {
+          uint8_t* yuvData[3];
+
+          SBufferInfo bufferInfo;
+          memset(&bufferInfo, 0, sizeof (SBufferInfo));
+
+          const uint32_t LEN{static_cast<uint32_t>(outData.size())};
+
+          if (0 != decoder->DecodeFrame2(reinterpret_cast<const unsigned char*>(outData.c_str()), LEN, yuvData, &bufferInfo)) {
+            std::cerr << "H264 decoding for current frame failed." << std::endl;
+          }
+          else {
+            if (1 == bufferInfo.iBufferStatus) {
+              sharedMemoryARGB->lock();
+              sharedMemoryARGB->setTimeStamp(cluon::time::now());
+              {
+                libyuv::I420ToARGB(yuvData[0], bufferInfo.UsrData.sSystemBuffer.iStride[0], yuvData[1], bufferInfo.UsrData.sSystemBuffer.iStride[1], yuvData[2], bufferInfo.UsrData.sSystemBuffer.iStride[1], reinterpret_cast<uint8_t*>(sharedMemoryARGB->data()), width * 4, width, height);
+                if (verbose) {
+                  XPutImage(display, window, DefaultGC(display, 0), ximage, 0, 0, 0, 0, width, height);
+                }
+              }
+              sharedMemoryARGB->unlock();
+
+              sharedMemoryI420->lock();
+	      {
+                memcpy(reinterpret_cast<uint8_t*>(sharedMemoryI420->data()), yuvData[0], bufferInfo.UsrData.sSystemBuffer.iStride[0]);
+                memcpy(reinterpret_cast<uint8_t*>(sharedMemoryI420->data() + (width * height)), yuvData[1], bufferInfo.UsrData.sSystemBuffer.iStride[1]);
+                memcpy(reinterpret_cast<uint8_t*>(sharedMemoryI420->data() + (width * height + ((width * height) >> 2))), yuvData[2], bufferInfo.UsrData.sSystemBuffer.iStride[2]);
+              }
+              sharedMemoryI420->unlock();
+              sharedMemoryI420->notifyAll();
+              sharedMemoryARGB->notifyAll();
+            }
+          }
+        }
+
+
         opendlv::proxy::ImageReading ir;
         ir.fourcc("h264").width(width).height(height).data(outData);
 
@@ -511,6 +564,59 @@ int32_t main(int32_t argc, char **argv)
           if (verbose) {
             std::cout << "Received " << outData.size() << " bytes (defragmented)." << std::endl;
           }
+
+          if (!sharedMemoryARGB) {
+            std::clog << "[opendlv-device-camera-rtp]: Created shared memory " << NAME_ARGB << " (" << (width * height * 4) << " bytes) for an ARGB image (width = " << width << ", height = " << height << ")." << std::endl;
+            sharedMemoryARGB.reset(new cluon::SharedMemory{NAME_ARGB, width * height * 4});
+            if (verbose) {
+              display = XOpenDisplay(NULL);
+              visual = DefaultVisual(display, 0);
+              window = XCreateSimpleWindow(display, RootWindow(display, 0), 0, 0, width, height, 1, 0, 0);
+              ximage = XCreateImage(display, visual, 24, ZPixmap, 0, reinterpret_cast<char*>(sharedMemoryARGB->data()), width, height, 32, 0);
+              XMapWindow(display, window);
+            }
+          }
+          if (!sharedMemoryI420) {
+            std::clog << "[opendlv-device-camera-rtp]: Created shared memory " << NAME_I420 << " (" << (width * height * 3/2) << " bytes) for an I420 image (width = " << width << ", height = " << height << ")." << std::endl;
+            sharedMemoryI420.reset(new cluon::SharedMemory{NAME_I420, width * height * 3/2});
+          }
+	  if (sharedMemoryARGB && sharedMemoryI420) {
+            uint8_t* yuvData[3];
+
+            SBufferInfo bufferInfo;
+            memset(&bufferInfo, 0, sizeof (SBufferInfo));
+
+            const uint32_t LEN{static_cast<uint32_t>(outData.size())};
+
+            if (0 != decoder->DecodeFrame2(reinterpret_cast<const unsigned char*>(outData.c_str()), LEN, yuvData, &bufferInfo)) {
+              std::cerr << "H264 decoding for current frame failed." << std::endl;
+            }
+            else {
+              if (1 == bufferInfo.iBufferStatus) {
+                sharedMemoryARGB->lock();
+                sharedMemoryARGB->setTimeStamp(cluon::time::now());
+                {
+                  libyuv::I420ToARGB(yuvData[0], bufferInfo.UsrData.sSystemBuffer.iStride[0], yuvData[1], bufferInfo.UsrData.sSystemBuffer.iStride[1], yuvData[2], bufferInfo.UsrData.sSystemBuffer.iStride[1], reinterpret_cast<uint8_t*>(sharedMemoryARGB->data()), width * 4, width, height);
+                  if (verbose) {
+                    XPutImage(display, window, DefaultGC(display, 0), ximage, 0, 0, 0, 0, width, height);
+                  }
+                }
+                sharedMemoryARGB->unlock();
+
+                sharedMemoryI420->lock();
+                {
+                  memcpy(reinterpret_cast<uint8_t*>(sharedMemoryI420->data()), yuvData[0], bufferInfo.UsrData.sSystemBuffer.iStride[0]);
+                  memcpy(reinterpret_cast<uint8_t*>(sharedMemoryI420->data() + (width * height)), yuvData[1], bufferInfo.UsrData.sSystemBuffer.iStride[1]);
+                  memcpy(reinterpret_cast<uint8_t*>(sharedMemoryI420->data() + (width * height + ((width * height) >> 2))), yuvData[2], bufferInfo.UsrData.sSystemBuffer.iStride[2]);
+                }
+                sharedMemoryI420->unlock();
+                sharedMemoryI420->notifyAll();
+                sharedMemoryARGB->notifyAll();
+              }
+            }
+          }
+
+
           opendlv::proxy::ImageReading ir;
           ir.fourcc("h264").width(width).height(height).data(outData);
           std::lock_guard<std::mutex> lck(recFileMutex);
@@ -544,10 +650,10 @@ int32_t main(int32_t argc, char **argv)
     auto onControlData = [&clientPortB, &serverPortB, &clientSsrc, &hostname, 
          &rtcpMutex, &latestNtpTime, &latestRtpTime, &jitter, &highestSeq,
          &verbose](
-             std::string &&data, std::string &&, 
+             std::string &&_data, std::string &&, 
              std::chrono::system_clock::time_point &&dataInTs) noexcept {
 
-      char const *buf_start = static_cast<char const *>(data.c_str());
+      char const *buf_start = static_cast<char const *>(_data.c_str());
 
     //  uint8_t const b0 = *buf_start;
     //  uint8_t const version = (b0 >> 6);
@@ -710,6 +816,15 @@ int32_t main(int32_t argc, char **argv)
     curl_easy_perform(curl);
 
     curl_easy_cleanup(curl);
+
+    if (decoder) {
+      decoder->Uninitialize();
+      WelsDestroyDecoder(decoder);
+    }
+
+    if (verbose && nullptr != display) {
+      XCloseDisplay(display);
+    }
 
     retCode = 0;
   }
