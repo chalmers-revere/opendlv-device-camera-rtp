@@ -1,3 +1,5 @@
+Moved to https://git.opendlv.org.
+
 ## OpenDLV microservice to interface with RTSP/RTP cameras
 
 This repository provides source code to interface with cameras providing a
